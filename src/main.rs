@@ -126,6 +126,19 @@ async fn deviantart_rss_handler(
                 tracing::info!(id, "Need to get the network for rss");
                 let result = fetch_deviantart_rss_with_timeout(&id, global_lock, 10).await;
                 tracing::info!(id, "Got result for rss");
+
+                match result {
+                    Ok(_) | Err(FetchError::NotAllowed) => {
+                        state
+                            .deviantart_state
+                            .fetch_ids
+                            .write()
+                            .expect("this shouldn't be poisoned")
+                            .insert(id.clone());
+                    }
+                    _ => {}
+                }
+
                 Arc::new(result.map(|s| compress_zstd(&s.into_bytes())))
             })
             .await
@@ -192,6 +205,41 @@ async fn main() -> Result<()> {
             fetch_ids: Default::default(),
         },
     };
+
+    {
+        let deviantart_state = state.deviantart_state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_mins(30)).await;
+
+                let ids = deviantart_state
+                    .fetch_ids
+                    .read()
+                    .expect("shouldn't be poisoned")
+                    .clone();
+                if ids.is_empty() {
+                    continue;
+                }
+                tracing::info!("Starting automatic refresh of {} ids", ids.len());
+                for id in ids.into_iter() {
+                    deviantart_state
+                        .cache
+                        .get_with_by_ref(&id, async {
+                            tracing::info!(id, "Re-fetching rss");
+                            let result = fetch_deviantart_rss_with_timeout(
+                                &id,
+                                deviantart_state.global_lock.clone(),
+                                10,
+                            )
+                            .await;
+                            tracing::info!(id, "Got result for rss");
+                            Arc::new(result.map(|s| compress_zstd(&s.into_bytes())))
+                        })
+                        .await;
+                }
+            }
+        });
+    }
 
     let app = Router::new()
         .route("/", get(|| async { Redirect::permanent("/browse/") }))
