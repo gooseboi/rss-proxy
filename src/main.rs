@@ -21,6 +21,18 @@ struct DeviantartQuery {
     id: String,
 }
 
+fn compress_zstd(b: &[u8]) -> Vec<u8> {
+    let mut out = vec![];
+    zstd::stream::copy_encode(b, &mut out, 3).expect("it's in memory");
+    out
+}
+
+fn decompress_zstd(b: &[u8]) -> Vec<u8> {
+    let mut out = vec![];
+    zstd::stream::copy_decode(b, &mut out).expect("it's in memory");
+    out
+}
+
 async fn fetch_deviantart_rss(id: &str) -> Result<String, FetchError> {
     let url = format!("https://backend.deviantart.com/rss.xml?q=gallery:{}", id);
 
@@ -43,27 +55,34 @@ async fn fetch_deviantart_rss(id: &str) -> Result<String, FetchError> {
             };
 
             let s = match String::from_utf8(bytes.into()) {
-                Ok(s) => s,
+                Ok(s) => {
+                    // If someone puts this as their feed description then they deserve to not be
+                    // followed
+                    if s.contains("<description>Error generating RSS.</description>") {
+                        tracing::error!(url, "Deviantart failed generating the feed");
+                        return Err(FetchError::ServerFailed);
+                    } else {
+                        s
+                    }
+                }
                 Err(e) => {
                     tracing::error!(error = ?e, url, "Failed converting bytes from url to UTF-8");
-                    return Err(FetchError::ServerError);
+                    return Err(FetchError::NotUTF8);
                 }
             };
 
             Ok(s)
         }
-        Err(e) => {
-            match e.status().expect("this is from a response") {
-                StatusCode::FORBIDDEN => {
-                    tracing::error!(url, "URL was blocked");
-                    Err(FetchError::NotAllowed)
-                }
-                code => {
-                    tracing::error!(?code, url, "Unknown error response");
-                    Err(FetchError::UnknownResponse)
-                }
+        Err(e) => match e.status().expect("this is from a response") {
+            StatusCode::FORBIDDEN => {
+                tracing::error!(url, "URL was blocked");
+                Err(FetchError::NotAllowed)
             }
-        }
+            code => {
+                tracing::error!(?code, url, "Unknown error response");
+                Err(FetchError::UnknownResponse)
+            }
+        },
     }
 }
 
@@ -107,7 +126,7 @@ async fn deviantart_rss_handler(
                 tracing::info!(id, "Need to get the network for rss");
                 let result = fetch_deviantart_rss_with_timeout(&id, global_lock, 10).await;
                 tracing::info!(id, "Got result for rss");
-                Arc::new(result)
+                Arc::new(result.map(|s| compress_zstd(&s.into_bytes())))
             })
             .await
     });
@@ -116,7 +135,11 @@ async fn deviantart_rss_handler(
     tracing::info!(id = query.id, "Got result from cache for rss");
 
     match *cached {
-        Ok(ref cached) => Ok(cached.clone()),
+        Ok(ref cached) => {
+            let bytes = decompress_zstd(cached);
+            let s = String::from_utf8(bytes).expect("we checked it was UTF-8 before putting it in");
+            Ok(s)
+        }
         Err(FetchError::NotAllowed) => Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "Try again later".to_string(),
@@ -132,13 +155,14 @@ async fn deviantart_rss_handler(
 enum FetchError {
     NotAllowed,
     NetworkError,
-    ServerError,
+    NotUTF8,
+    ServerFailed,
     UnknownResponse,
 }
 
 #[derive(Clone, Debug)]
 struct DeviantartState {
-    cache: Cache<String, Arc<Result<String, FetchError>>>,
+    cache: Cache<String, Arc<Result<Vec<u8>, FetchError>>>,
     fetch_ids: Arc<RwLock<HashSet<String>>>,
     global_lock: Arc<Mutex<()>>,
 }
