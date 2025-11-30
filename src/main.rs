@@ -92,7 +92,13 @@ async fn fetch_deviantart_rss_with_timeout(
     let id = id.to_string();
 
     tokio::spawn(async move {
-        let guard = lock.lock().await;
+        let guard = match lock.try_lock(){
+            Ok(g) => g,
+            Err(_) => {
+                tracing::info!(id, "Waiting for turn...");
+                lock.lock().await
+            },
+        };
 
         tx.send(fetch_deviantart_rss(&id).await)
             .expect("the receiver shouldn't drop");
