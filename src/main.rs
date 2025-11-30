@@ -8,12 +8,9 @@ use axum::{
 use color_eyre::Result;
 use moka::future::{Cache, CacheBuilder};
 use serde::Deserialize;
-use std::{
-    collections::HashSet,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
-use tokio::sync::Mutex;
+use std::sync::Mutex;
+use std::{collections::HashSet, sync::Arc, time::Duration};
+use tokio::sync::Mutex as TokioMutex;
 use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 #[derive(Deserialize, Debug)]
@@ -88,7 +85,7 @@ async fn fetch_deviantart_rss(id: &str) -> Result<String, FetchError> {
 
 async fn fetch_deviantart_rss_with_timeout(
     id: &str,
-    lock: Arc<Mutex<()>>,
+    lock: Arc<TokioMutex<()>>,
     timeout: u16,
 ) -> Result<String, FetchError> {
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -123,7 +120,7 @@ async fn deviantart_rss_handler(
     let handle = tokio::spawn(async move {
         cache
             .get_with_by_ref(&id, async {
-                tracing::info!(id, "Need to get the network for rss");
+                tracing::info!(id, "Need to hit the network for rss");
                 let result = fetch_deviantart_rss_with_timeout(&id, global_lock, 10).await;
                 tracing::info!(id, "Got result for rss");
 
@@ -132,7 +129,7 @@ async fn deviantart_rss_handler(
                         state
                             .deviantart_state
                             .fetch_ids
-                            .write()
+                            .lock()
                             .expect("this shouldn't be poisoned")
                             .insert(id.clone());
                     }
@@ -145,7 +142,7 @@ async fn deviantart_rss_handler(
     });
 
     let cached = handle.await.expect("can join thread");
-    tracing::info!(id = query.id, "Got result from cache for rss");
+    tracing::debug!(id = query.id, "Got result from cache for rss");
 
     match *cached {
         Ok(ref cached) => {
@@ -176,13 +173,119 @@ enum FetchError {
 #[derive(Clone, Debug)]
 struct DeviantartState {
     cache: Cache<String, Arc<Result<Vec<u8>, FetchError>>>,
-    fetch_ids: Arc<RwLock<HashSet<String>>>,
-    global_lock: Arc<Mutex<()>>,
+    fetch_ids: Arc<Mutex<HashSet<String>>>,
+    global_lock: Arc<TokioMutex<()>>,
 }
 
 #[derive(Clone, Debug)]
 struct AppState {
     deviantart_state: DeviantartState,
+}
+
+fn spawn_refresh(state: AppState) {
+    // Every `n` minutes, we refetch keys that were successfully fetched before
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_mins(10)).await;
+
+            let ids = state
+                .deviantart_state
+                .fetch_ids
+                .lock()
+                .expect("shouldn't be poisoned")
+                .clone();
+            if ids.is_empty() {
+                continue;
+            }
+
+            tracing::info!("Starting automatic refresh of {} ids", ids.len());
+            for id in ids.into_iter() {
+                state
+                    .deviantart_state
+                    .cache
+                    .get_with_by_ref(&id, async {
+                        tracing::info!(id, "Re-fetching rss");
+                        let result = fetch_deviantart_rss_with_timeout(
+                            &id,
+                            state.deviantart_state.global_lock.clone(),
+                            10,
+                        )
+                        .await;
+                        tracing::info!(id, "Got result for rss");
+                        Arc::new(result.map(|s| compress_zstd(&s.into_bytes())))
+                    })
+                    .await;
+            }
+            tracing::info!("Finished automatic refresh of ids");
+        }
+    });
+}
+
+fn spawn_refresh_blocked(state: AppState) {
+    // Every `n` minutes, we retry on keys that were blocked before
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_mins(5)).await;
+
+            let ids = state
+                .deviantart_state
+                .fetch_ids
+                .lock()
+                .expect("shouldn't be poisoned")
+                .clone();
+            if ids.is_empty() {
+                continue;
+            }
+
+            let mut did_fetch = false;
+            for id in ids.into_iter() {
+                let should_fetch = match state
+                    .deviantart_state
+                    .cache
+                    .get(&id)
+                    .await
+                    .as_ref()
+                    .map(|res| res.as_ref())
+                {
+                    Some(Ok(_)) => false,
+                    Some(Err(FetchError::NotAllowed)) => true,
+                    Some(Err(_)) => true,
+                    None => false,
+                };
+
+                if !should_fetch {
+                    continue;
+                }
+
+                // We need to invalidate this because we need to run `get_with_by_ref`, and that
+                // function won't evaluate the future if the key is already there. We need to run
+                // `get_with_by_ref` because we want this fetch to coalesce with the
+                // `get_with_by_ref` calls elsewhere to avoid hammering the deviantart server
+                state.deviantart_state.cache.invalidate(&id).await;
+
+                tracing::info!(id, "Starting automatic refresh of blocked id");
+                did_fetch = true;
+                state
+                    .deviantart_state
+                    .cache
+                    .get_with_by_ref(&id, async {
+                        tracing::info!(id, "Re-fetching rss");
+                        let result = fetch_deviantart_rss_with_timeout(
+                            &id,
+                            state.deviantart_state.global_lock.clone(),
+                            10,
+                        )
+                        .await;
+                        tracing::info!(id, "Got result for rss");
+                        Arc::new(result.map(|s| compress_zstd(&s.into_bytes())))
+                    })
+                    .await;
+            }
+            if did_fetch {
+                tracing::info!("Finished automatic refresh of blocked ids");
+            }
+        }
+    });
 }
 
 #[tokio::main]
@@ -206,40 +309,8 @@ async fn main() -> Result<()> {
         },
     };
 
-    {
-        let deviantart_state = state.deviantart_state.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_mins(30)).await;
-
-                let ids = deviantart_state
-                    .fetch_ids
-                    .read()
-                    .expect("shouldn't be poisoned")
-                    .clone();
-                if ids.is_empty() {
-                    continue;
-                }
-                tracing::info!("Starting automatic refresh of {} ids", ids.len());
-                for id in ids.into_iter() {
-                    deviantart_state
-                        .cache
-                        .get_with_by_ref(&id, async {
-                            tracing::info!(id, "Re-fetching rss");
-                            let result = fetch_deviantart_rss_with_timeout(
-                                &id,
-                                deviantart_state.global_lock.clone(),
-                                10,
-                            )
-                            .await;
-                            tracing::info!(id, "Got result for rss");
-                            Arc::new(result.map(|s| compress_zstd(&s.into_bytes())))
-                        })
-                        .await;
-                }
-            }
-        });
-    }
+    spawn_refresh(state.clone());
+    spawn_refresh_blocked(state.clone());
 
     let app = Router::new()
         .route("/", get(|| async { Redirect::permanent("/browse/") }))
