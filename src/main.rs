@@ -96,30 +96,37 @@ async fn fetch_deviantart_rss_with_timeout(
     let (tx, rx) = tokio::sync::oneshot::channel();
     let id = id.to_string();
 
-    tokio::spawn(async move {
-        let guard = match lock.try_lock() {
-            Ok(g) => g,
-            Err(_) => {
-                let span = tracing::span!(
-                    tracing::Level::INFO,
-                    "fetch_deviantart_rss_with_timeout",
-                    id
-                );
-                async {
-                    tracing::info!("Waiting for turn...");
-                    let l = lock.lock().await;
-                    tracing::info!("I got the turn");
-                    l
-                }.instrument(span).await
-            }
-        };
+    let span = tracing::span!(
+        tracing::Level::INFO,
+        "fetch_deviantart_rss_with_timeout",
+        id
+    );
 
-        tx.send(fetch_deviantart_rss(&id).await)
-            .expect("the receiver shouldn't drop");
+    tokio::spawn(
+        async move {
+            let guard = match lock.try_lock() {
+                Ok(g) => g,
+                Err(_) => {
+                    async {
+                        tracing::info!("Waiting for turn...");
+                        let l = lock.lock().await;
+                        tracing::info!("I got the turn");
+                        l
+                    }
+                    .await
+                }
+            };
 
-        tokio::time::sleep(Duration::from_secs(timeout.into())).await;
-        drop(guard);
-    });
+            tx.send(fetch_deviantart_rss(&id).await)
+                .expect("the receiver shouldn't drop");
+
+            tracing::info!("Waiting for {timeout} secs until ceding turn");
+            tokio::time::sleep(Duration::from_secs(timeout.into())).await;
+            tracing::info!("Ceding turn");
+            drop(guard);
+        }
+        .instrument(span),
+    );
 
     rx.await.expect("the sender shouldn't drop")
 }
