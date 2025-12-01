@@ -11,7 +11,7 @@ use serde::Deserialize;
 use std::sync::Mutex;
 use std::{collections::HashSet, sync::Arc, time::Duration};
 use tokio::sync::Mutex as TokioMutex;
-use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
+use tracing::{Instrument as _, instrument, level_filters::LevelFilter};
 
 #[derive(Deserialize, Debug)]
 struct DeviantartQuery {
@@ -30,6 +30,7 @@ fn decompress_zstd(b: &[u8]) -> Vec<u8> {
     out
 }
 
+#[instrument]
 async fn fetch_deviantart_rss(id: &str) -> Result<String, FetchError> {
     let url = format!("https://backend.deviantart.com/rss.xml?q=gallery:{}", id);
 
@@ -92,12 +93,21 @@ async fn fetch_deviantart_rss_with_timeout(
     let id = id.to_string();
 
     tokio::spawn(async move {
-        let guard = match lock.try_lock(){
+        let guard = match lock.try_lock() {
             Ok(g) => g,
             Err(_) => {
-                tracing::info!(id, "Waiting for turn...");
-                lock.lock().await
-            },
+                let span = tracing::span!(
+                    tracing::Level::INFO,
+                    "fetch_deviantart_rss_with_timeout",
+                    id
+                );
+                async {
+                    tracing::info!("Waiting for turn...");
+                    let l = lock.lock().await;
+                    tracing::info!("I got the turn");
+                    l
+                }.instrument(span).await
+            }
         };
 
         tx.send(fetch_deviantart_rss(&id).await)
@@ -110,7 +120,6 @@ async fn fetch_deviantart_rss_with_timeout(
     rx.await.expect("the sender shouldn't drop")
 }
 
-#[axum::debug_handler]
 async fn deviantart_rss_handler(
     State(state): State<AppState>,
     Query(query): Query<DeviantartQuery>,
@@ -119,31 +128,44 @@ async fn deviantart_rss_handler(
     let global_lock = state.deviantart_state.global_lock.clone();
     let id = query.id.clone();
 
-    tracing::info!(id, "Getting rss for id");
+    let span = tracing::span!(tracing::Level::INFO, "deviantart_rss_handler", id);
+    let _guard = span.enter();
+    span.in_scope(|| tracing::info!("Getting rss"));
 
     // This task is spawned so that if this request is cancelled then
     // the task continues and the id is fetched anyways
+    let coro_span = span.clone();
     let handle = tokio::spawn(async move {
         cache
-            .get_with_by_ref(&id, async {
-                tracing::info!(id, "Need to hit the network for rss");
-                let result = fetch_deviantart_rss_with_timeout(&id, global_lock, 10).await;
-                tracing::info!(id, "Got result for rss");
+            .get_with_by_ref(
+                &id,
+                async {
+                    tracing::info!("Result not cached, need to hit the network");
+                    let result = fetch_deviantart_rss_with_timeout(&id, global_lock, 10).await;
+                    tracing::info!("Finished fetching from network");
 
-                match result {
-                    Ok(_) | Err(FetchError::NotAllowed) => {
-                        state
-                            .deviantart_state
-                            .fetch_ids
-                            .lock()
-                            .expect("this shouldn't be poisoned")
-                            .insert(id.clone());
+                    match result {
+                        Ok(_) => tracing::info!("Got result from server"),
+                        Err(FetchError::NotAllowed) => tracing::info!("Got blocked by server"),
+                        Err(e) => tracing::info!(?e, "An error ocurred"),
+                    };
+
+                    match result {
+                        Ok(_) | Err(FetchError::NotAllowed) => {
+                            state
+                                .deviantart_state
+                                .fetch_ids
+                                .lock()
+                                .expect("this shouldn't be poisoned")
+                                .insert(id.clone());
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                }
 
-                Arc::new(result.map(|s| compress_zstd(&s.into_bytes())))
-            })
+                    Arc::new(result.map(|s| compress_zstd(&s.into_bytes())))
+                }
+                .instrument(coro_span),
+            )
             .await
     });
 
@@ -204,22 +226,38 @@ fn spawn_refresh(state: AppState) {
                 continue;
             }
 
-            tracing::info!("Starting automatic refresh of {} ids", ids.len());
+            let span = tracing::span!(tracing::Level::INFO, "automatic-refresh");
+            span.in_scope(|| tracing::info!("Starting automatic refresh of {} ids", ids.len()));
             for id in ids.into_iter() {
+                let id_span = tracing::span!(parent: &span, tracing::Level::INFO, "automatic-refresh-for-id", id);
                 state
                     .deviantart_state
                     .cache
-                    .get_with_by_ref(&id, async {
-                        tracing::info!(id, "Re-fetching rss");
-                        let result = fetch_deviantart_rss_with_timeout(
-                            &id,
-                            state.deviantart_state.global_lock.clone(),
-                            10,
-                        )
-                        .await;
-                        tracing::info!(id, "Got result for rss");
-                        Arc::new(result.map(|s| compress_zstd(&s.into_bytes())))
-                    })
+                    .get_with_by_ref(
+                        &id,
+                        async {
+                            tracing::info!("Re-fetching rss");
+
+                            let result = fetch_deviantart_rss_with_timeout(
+                                &id,
+                                state.deviantart_state.global_lock.clone(),
+                                10,
+                            )
+                            .instrument(id_span.clone())
+                            .await;
+
+                            match result {
+                                Ok(_) => tracing::info!("Got result from server"),
+                                Err(FetchError::NotAllowed) => {
+                                    tracing::warn!("Got blocked by server")
+                                }
+                                Err(e) => tracing::error!(?e, "An error ocurred"),
+                            };
+
+                            Arc::new(result.map(|s| compress_zstd(&s.into_bytes())))
+                        }
+                        .instrument(id_span.clone()),
+                    )
                     .await;
             }
             tracing::info!("Finished automatic refresh of ids");
@@ -269,20 +307,28 @@ fn spawn_refresh_blocked(state: AppState) {
                 // `get_with_by_ref` calls elsewhere to avoid hammering the deviantart server
                 state.deviantart_state.cache.invalidate(&id).await;
 
-                tracing::info!(id, "Starting automatic refresh of blocked id");
+                let span = tracing::span!(tracing::Level::INFO, "blocked-id-refresh", id);
+                span.in_scope(|| tracing::info!("Starting automatic refresh of blocked id"));
                 did_fetch = true;
                 state
                     .deviantart_state
                     .cache
                     .get_with_by_ref(&id, async {
-                        tracing::info!(id, "Re-fetching rss");
+                        tracing::info!(id, "Re-fetching blocked rss");
                         let result = fetch_deviantart_rss_with_timeout(
                             &id,
                             state.deviantart_state.global_lock.clone(),
                             10,
                         )
+                        .instrument(span.clone())
                         .await;
-                        tracing::info!(id, "Got result for rss");
+
+                        span.in_scope(|| match result {
+                            Ok(_) => tracing::info!("Got result from server"),
+                            Err(FetchError::NotAllowed) => tracing::info!("Got blocked by server"),
+                            Err(e) => tracing::info!(?e, "An error ocurred"),
+                        });
+
                         Arc::new(result.map(|s| compress_zstd(&s.into_bytes())))
                     })
                     .await;
@@ -296,12 +342,13 @@ fn spawn_refresh_blocked(state: AppState) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "deviantart_rss=debug".into()),
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(LevelFilter::INFO.into())
+                .with_env_var("RSS_LOG")
+                .from_env_lossy(),
         )
-        .with(tracing_subscriber::fmt::layer())
         .init();
     color_eyre::install()?;
 
