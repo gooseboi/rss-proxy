@@ -9,4 +9,3 @@ pub fn decompress_zstd(b: &[u8]) -> Vec<u8> {
     zstd::stream::copy_decode(b, &mut out).expect("it's in memory");
     out
 }
-

@@ -252,7 +252,9 @@ fn spawn_refresh_blocked(state: &DeviantartState, config: &AppConfig) {
 
                         span.in_scope(|| match result {
                             Ok(_) => tracing::info!("Got result from server"),
-                            Err(FetchError::NotAllowed) => tracing::info!("Got blocked by server"),
+                            Err(FetchError::NotAllowed) => {
+                                tracing::info!("Got blocked by server")
+                            }
                             Err(e) => tracing::info!(?e, "An error ocurred"),
                         });
 

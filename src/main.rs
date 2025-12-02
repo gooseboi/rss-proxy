@@ -3,8 +3,8 @@ use color_eyre::Result;
 use std::{net::IpAddr, sync::Arc};
 
 use crate::deviantart::DeviantartState;
-use tracing::level_filters::LevelFilter;
 use clap::Parser as _;
+use tracing::level_filters::LevelFilter;
 
 mod deviantart;
 mod handlers;
