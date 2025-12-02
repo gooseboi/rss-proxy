@@ -20,7 +20,7 @@ struct AppState {
 #[command(author, version, about)]
 pub struct AppConfig {
     /// Address to bind
-    #[arg(long = "addr", env = "RSS_PROXY_ADDR")]
+    #[arg(env = "RSS_PROXY_ADDR")]
     bind_address: IpAddr,
 
     /// Port to bind
