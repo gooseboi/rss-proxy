@@ -19,11 +19,10 @@ pub struct DeviantartState {
 }
 
 impl From<AppConfig> for DeviantartState {
-    fn from(_value: AppConfig) -> Self {
-        // TODO: Set TTL from AppConfig
+    fn from(config: AppConfig) -> Self {
         DeviantartState {
-            cache: CacheBuilder::new(300)
-                .time_to_live(Duration::from_mins(30))
+            cache: CacheBuilder::new(config.deviantart_max_entries)
+                .time_to_live(Duration::from_mins(config.deviantart_cache_ttl))
                 .build(),
             global_lock: Default::default(),
             fetch_ids: Default::default(),
@@ -34,7 +33,7 @@ impl From<AppConfig> for DeviantartState {
 pub async fn fetch_deviantart_rss_with_timeout(
     id: &str,
     lock: Arc<TokioMutex<()>>,
-    timeout: u16,
+    timeout: u64,
 ) -> Result<String, FetchError> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let id = id.to_string();
@@ -64,7 +63,7 @@ pub async fn fetch_deviantart_rss_with_timeout(
                 .expect("the receiver shouldn't drop");
 
             tracing::info!("Waiting for {timeout} secs until ceding turn");
-            tokio::time::sleep(Duration::from_secs(timeout.into())).await;
+            tokio::time::sleep(Duration::from_secs(timeout)).await;
             tracing::info!("Ceding turn");
             drop(guard);
         }

@@ -4,6 +4,7 @@ use std::{net::IpAddr, sync::Arc};
 
 use crate::deviantart::DeviantartState;
 use tracing::level_filters::LevelFilter;
+use clap::Parser as _;
 
 mod deviantart;
 mod handlers;
@@ -15,42 +16,28 @@ struct AppState {
     config: Arc<AppConfig>,
 }
 
-#[derive(Debug, Clone)]
-struct AppConfig {
+#[derive(clap::Parser, Debug, Clone)]
+#[command(author, version, about)]
+pub struct AppConfig {
+    /// Address to bind
+    #[arg(long = "addr", env = "RSS_PROXY_ADDR")]
     bind_address: IpAddr,
+
+    /// Port to bind
+    #[arg(env = "RSS_PROXY_PORT")]
     bind_port: u16,
-    deviantart_waiting_time: u16,
-}
 
-impl AppConfig {
-    fn parse() -> Self {
-        let name = "RSS_PROXY_ADDR";
-        let addr = std::env::var(name)
-            .unwrap_or_else(|_| panic!("{name} must be a valid env variable"))
-            .parse()
-            .expect("valid ip address");
+    /// DeviantArt: Time to wait between two requests (in seconds)
+    #[arg(env = "RSS_PROXY_DEVIANTART_WAITING_TIME", default_value = "10")]
+    deviantart_waiting_time: u64,
 
-        let name = "RSS_PROXY_PORT";
-        let port = std::env::var(name)
-            .unwrap_or_else(|_| panic!("{name} must be a valid env variable"))
-            .parse()
-            .expect("port must be a number");
+    /// DeviantArt: Time for a single (succesful) request to live in the cache (in minutes)
+    #[arg(env = "RSS_PROXY_DEVIANTART_CACHE_TTL", default_value = "30")]
+    deviantart_cache_ttl: u64,
 
-        let name = "RSS_DEVIANTART_WAITING_TIME";
-        let waiting_time = match std::env::var(name) {
-            Ok(v) => v,
-            Err(std::env::VarError::NotPresent) => "10".to_string(),
-            Err(_) => panic!("expected valid environment variable for {name}"),
-        }
-        .parse()
-        .expect("waiting time must be a number");
-
-        Self {
-            deviantart_waiting_time: waiting_time,
-            bind_port: port,
-            bind_address: addr,
-        }
-    }
+    /// DeviantArt: Maximum amount of entries to keep at one time
+    #[arg(env = "RSS_PROXY_DEVIANTART_MAX_ENTRIES", default_value = "300")]
+    deviantart_max_entries: u64,
 }
 
 #[tokio::main]
