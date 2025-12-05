@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/", get(|| async { Redirect::permanent("/browse/") }))
+        .route("/stats", get(handlers::stats_handler))
         .route("/deviantart", get(handlers::deviantart_rss_handler))
         .with_state(state);
 

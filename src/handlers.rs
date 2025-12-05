@@ -1,16 +1,39 @@
 use axum::{
     extract::{Query, State},
-    http::status::StatusCode,
+    http::{Response, status::StatusCode},
 };
 use serde::Deserialize;
 
 use crate::{
     AppState,
-    deviantart::{FetchError, fetch_deviantart_rss_with_timeout},
+    deviantart::{self, FetchError, fetch_deviantart_rss_with_timeout},
     utils,
 };
 use std::sync::Arc;
 use tracing::Instrument as _;
+
+pub async fn stats_handler(
+    State(state): State<AppState>,
+) -> Result<Response<String>, (StatusCode, String)> {
+    let deviantart_html = deviantart::get_stats(state.deviantart_state.clone());
+
+    let mut out = String::new();
+    out.push_str("<html>");
+
+    out.push_str("<head>");
+    out.push_str("</head>");
+
+    out.push_str("<body>");
+    out.push_str("<h1>Deviantart</h1>");
+    out.push_str(&deviantart_html);
+    out.push_str("</body>");
+
+    Response::builder()
+        .status(200)
+        .header("Content-Type", "text/html")
+        .body(out)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
 
 #[derive(Deserialize, Debug)]
 pub struct DeviantartQuery {

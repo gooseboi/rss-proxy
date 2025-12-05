@@ -127,7 +127,7 @@ async fn fetch_deviantart_rss(id: &str) -> Result<String, FetchError> {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(PartialEq, Eq, Copy, Clone, Debug)]
 pub enum FetchError {
     NotAllowed,
     NetworkError,
@@ -267,4 +267,69 @@ fn spawn_refresh_blocked(state: &DeviantartState, config: &AppConfig) {
             }
         }
     });
+}
+
+pub fn get_stats(state: DeviantartState) -> String {
+    let mut out = String::new();
+    out.push_str("<div>");
+    out.push_str("<h2>Fetch ids</h2>");
+    out.push_str("<ul>");
+    let lock = state.fetch_ids.lock().expect("lock shouldn't be poisoned");
+    for id in lock.iter() {
+        out.push_str(&format!("<li>{id}</li>"));
+    }
+    drop(lock);
+    out.push_str("</ul>");
+
+    let results = state.cache.iter().collect::<Vec<_>>();
+
+    out.push_str("<h2>Values</h2>");
+    out.push_str("<h3>Success</h3>");
+    out.push_str("<ul>");
+    for (k, _) in results.iter().filter(|(_, v)| v.is_ok()) {
+        out.push_str(&format!("<li>{k}</li>"));
+    }
+    out.push_str("</ul>");
+
+    out.push_str("<h3>Blocked</h3>");
+    out.push_str("<ul>");
+    for (k, _) in results.iter().filter(|(_, v)| {
+        v.as_ref()
+            .as_ref()
+            .is_err_and(|e| *e == FetchError::NotAllowed)
+    }) {
+        out.push_str(&format!("<li>{k}</li>"));
+    }
+    out.push_str("</ul>");
+
+    out.push_str("<h3>Error</h3>");
+    out.push_str("<table>");
+
+    out.push_str("<thead>");
+    out.push_str("<tr>");
+    out.push_str("<th>ID</th>");
+    out.push_str("<th>Error</th>");
+    out.push_str("</tr>");
+    out.push_str("</thead>");
+
+    out.push_str("<tbody>");
+    for (k, v) in results.iter().filter(|(_, v)| {
+        v.as_ref()
+            .as_ref()
+            .is_err_and(|e| *e != FetchError::NotAllowed)
+    }) {
+        let Err(v) = v.as_ref() else { unreachable!() };
+        out.push_str("<tr>");
+        out.push_str(&format!("<td>{k}</td>"));
+        out.push_str(&format!("<td>{v:?}</td>"));
+        out.push_str("<td>Error</td>");
+        out.push_str("</tr>");
+    }
+    out.push_str("</tbody>");
+
+    out.push_str("</table>");
+
+    out.push_str("</div>");
+
+    out
 }
