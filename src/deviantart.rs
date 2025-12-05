@@ -1,8 +1,7 @@
 use moka::future::{Cache, CacheBuilder};
-use parking_lot::RwLock;
 use reqwest::StatusCode;
 use std::{collections::HashSet, sync::Arc, time::Duration};
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{Instrument as _, instrument};
 
 use crate::AppConfig;
@@ -11,8 +10,8 @@ use crate::utils;
 #[derive(Clone, Debug)]
 pub struct DeviantartState {
     pub cache: Cache<String, Arc<Result<Vec<u8>, FetchError>>>,
-    pub fetch_ids: Arc<RwLock<HashSet<String>>>,
-    pub global_lock: Arc<TokioMutex<()>>,
+    pub fetch_ids: Arc<RwLock<HashSet<Arc<str>>>>,
+    pub global_lock: Arc<Mutex<()>>,
 }
 
 impl From<AppConfig> for DeviantartState {
@@ -29,7 +28,7 @@ impl From<AppConfig> for DeviantartState {
 
 pub async fn fetch_deviantart_rss_with_timeout(
     id: &str,
-    lock: Arc<TokioMutex<()>>,
+    lock: Arc<Mutex<()>>,
     timeout: u64,
 ) -> Result<String, FetchError> {
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -147,28 +146,24 @@ fn spawn_refresh(state: &DeviantartState, config: &AppConfig) {
         loop {
             tokio::time::sleep(Duration::from_mins(10)).await;
 
-            let ids = state
-                .fetch_ids
-                .read()
-                // TODO: Can we not clone?
-                .clone();
+            let ids = state.fetch_ids.read().await;
             if ids.is_empty() {
                 continue;
             }
 
             let span = tracing::span!(tracing::Level::INFO, "automatic-refresh");
             span.in_scope(|| tracing::info!("Starting automatic refresh of {} ids", ids.len()));
-            for id in ids.into_iter() {
-                let id_span = tracing::span!(parent: &span, tracing::Level::INFO, "automatic-refresh-for-id", id);
+            for id in ids.iter() {
+                let id_span = tracing::span!(parent: &span, tracing::Level::INFO, "automatic-refresh-for-id", id = id.as_ref());
                 state
                     .cache
                     .get_with_by_ref(
-                        &id,
+                        id.as_ref(),
                         async {
                             tracing::info!("Re-fetching rss");
 
                             let result = fetch_deviantart_rss_with_timeout(
-                                &id,
+                                id.as_ref(),
                                 state.global_lock.clone(),
                                 config.deviantart_waiting_time,
                             )
@@ -203,18 +198,15 @@ fn spawn_refresh_blocked(state: &DeviantartState, config: &AppConfig) {
         loop {
             tokio::time::sleep(Duration::from_mins(5)).await;
 
-            let ids = state
-                .fetch_ids
-                .read()
-                // TODO: Can we not clone?
-                .clone();
+            let ids = state.fetch_ids.read().await;
             if ids.is_empty() {
                 continue;
             }
 
             let mut did_fetch = false;
-            for id in ids.into_iter() {
-                let should_fetch = match state.cache.get(&id).await.as_ref().map(|res| res.as_ref())
+            for id in ids.iter() {
+                let id = id.as_ref();
+                let should_fetch = match state.cache.get(id).await.as_ref().map(|res| res.as_ref())
                 {
                     Some(Ok(_)) => false,
                     Some(Err(FetchError::NotAllowed)) => true,
@@ -230,17 +222,17 @@ fn spawn_refresh_blocked(state: &DeviantartState, config: &AppConfig) {
                 // function won't evaluate the future if the key is already there. We need to run
                 // `get_with_by_ref` because we want this fetch to coalesce with the
                 // `get_with_by_ref` calls elsewhere to avoid hammering the deviantart server
-                state.cache.invalidate(&id).await;
+                state.cache.invalidate(id).await;
 
                 let span = tracing::span!(tracing::Level::INFO, "blocked-id-refresh", id);
                 span.in_scope(|| tracing::info!("Starting automatic refresh of blocked id"));
                 did_fetch = true;
                 state
                     .cache
-                    .get_with_by_ref(&id, async {
+                    .get_with_by_ref(id, async {
                         tracing::info!(id, "Re-fetching blocked rss");
                         let result = fetch_deviantart_rss_with_timeout(
-                            &id,
+                            id,
                             state.global_lock.clone(),
                             config.deviantart_waiting_time,
                         )
@@ -266,12 +258,12 @@ fn spawn_refresh_blocked(state: &DeviantartState, config: &AppConfig) {
     });
 }
 
-pub fn get_stats(state: DeviantartState) -> String {
+pub async fn get_stats(state: DeviantartState) -> String {
     let mut out = String::new();
     out.push_str("<div>");
     out.push_str("<h2>Fetch ids</h2>");
     out.push_str("<ul>");
-    let lock = state.fetch_ids.read();
+    let lock = state.fetch_ids.read().await;
     for id in lock.iter() {
         out.push_str(&format!("<li>{id}</li>"));
     }

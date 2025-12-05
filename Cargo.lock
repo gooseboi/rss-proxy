@@ -1200,7 +1200,6 @@ dependencies = [
  "clap",
  "color-eyre",
  "moka",
- "parking_lot",
  "reqwest",
  "serde",
  "tokio",

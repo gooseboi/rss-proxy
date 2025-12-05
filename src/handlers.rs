@@ -15,7 +15,7 @@ use tracing::Instrument as _;
 pub async fn stats_handler(
     State(state): State<AppState>,
 ) -> Result<Response<String>, (StatusCode, String)> {
-    let deviantart_html = deviantart::get_stats(state.deviantart_state.clone());
+    let deviantart_html = deviantart::get_stats(state.deviantart_state.clone()).await;
 
     let mut out = String::new();
     out.push_str("<html>");
@@ -81,7 +81,8 @@ pub async fn deviantart_rss_handler(
                                 .deviantart_state
                                 .fetch_ids
                                 .write()
-                                .insert(id.clone());
+                                .await
+                                .insert(id.clone().into());
                         }
                         _ => {}
                     }
