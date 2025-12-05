@@ -80,8 +80,7 @@ pub async fn deviantart_rss_handler(
                             state
                                 .deviantart_state
                                 .fetch_ids
-                                .lock()
-                                .expect("this shouldn't be poisoned")
+                                .write()
                                 .insert(id.clone());
                         }
                         _ => {}

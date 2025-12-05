@@ -1,10 +1,7 @@
 use moka::future::{Cache, CacheBuilder};
+use parking_lot::RwLock;
 use reqwest::StatusCode;
-use std::{
-    collections::HashSet,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 use tokio::sync::Mutex as TokioMutex;
 use tracing::{Instrument as _, instrument};
 
@@ -14,7 +11,7 @@ use crate::utils;
 #[derive(Clone, Debug)]
 pub struct DeviantartState {
     pub cache: Cache<String, Arc<Result<Vec<u8>, FetchError>>>,
-    pub fetch_ids: Arc<Mutex<HashSet<String>>>,
+    pub fetch_ids: Arc<RwLock<HashSet<String>>>,
     pub global_lock: Arc<TokioMutex<()>>,
 }
 
@@ -152,8 +149,8 @@ fn spawn_refresh(state: &DeviantartState, config: &AppConfig) {
 
             let ids = state
                 .fetch_ids
-                .lock()
-                .expect("shouldn't be poisoned")
+                .read()
+                // TODO: Can we not clone?
                 .clone();
             if ids.is_empty() {
                 continue;
@@ -208,8 +205,8 @@ fn spawn_refresh_blocked(state: &DeviantartState, config: &AppConfig) {
 
             let ids = state
                 .fetch_ids
-                .lock()
-                .expect("shouldn't be poisoned")
+                .read()
+                // TODO: Can we not clone?
                 .clone();
             if ids.is_empty() {
                 continue;
@@ -274,7 +271,7 @@ pub fn get_stats(state: DeviantartState) -> String {
     out.push_str("<div>");
     out.push_str("<h2>Fetch ids</h2>");
     out.push_str("<ul>");
-    let lock = state.fetch_ids.lock().expect("lock shouldn't be poisoned");
+    let lock = state.fetch_ids.read();
     for id in lock.iter() {
         out.push_str(&format!("<li>{id}</li>"));
     }
