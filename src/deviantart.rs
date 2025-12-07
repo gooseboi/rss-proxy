@@ -261,62 +261,106 @@ fn spawn_refresh_blocked(state: &DeviantartState, config: &AppConfig) {
 pub async fn get_stats(state: DeviantartState) -> String {
     let mut out = String::new();
     out.push_str("<div>");
-    out.push_str("<h2>Fetch ids</h2>");
-    out.push_str("<ul>");
+
     let lock = state.fetch_ids.read().await;
-    for id in lock.iter() {
-        out.push_str(&format!("<li>{id}</li>"));
+
+    out.push_str("<h2>Automatically fetched</h2>");
+    if !lock.is_empty() {
+        out.push_str("<table>");
+        out.push_str("<thead>");
+        out.push_str("<tr>");
+        out.push_str("<th>ID</th>");
+        out.push_str("<th>Status</th>");
+        out.push_str("</tr>");
+        out.push_str("</thead>");
+        out.push_str("<tbody>");
+        for id in lock.iter() {
+            out.push_str("<tr>");
+            out.push_str(&format!("<td>{id}</td>"));
+            let value = state.cache.get(id.as_ref()).await;
+            match value.as_ref().map(|res| res.as_ref()) {
+                Some(Ok(_)) => out.push_str("<td>Ok</td>"),
+                Some(Err(FetchError::NotAllowed)) => out.push_str("<td>Blocked</td>"),
+                Some(Err(e)) => out.push_str(&format!("<td>{e:?}</td>")),
+
+                None => out.push_str("<td>Empty</td>"),
+            }
+            out.push_str("</tr>");
+        }
+        out.push_str("</tbody>");
+        out.push_str("</table>");
+    } else {
+        out.push_str("None");
     }
+
+    let non_fetch = state
+        .cache
+        .iter()
+        .filter(|(id, _)| !lock.contains(id.as_ref().as_str()))
+        .collect::<Vec<_>>();
     drop(lock);
-    out.push_str("</ul>");
 
-    let results = state.cache.iter().collect::<Vec<_>>();
+    out.push_str("<h2>Not automatically fetched</h2>");
 
-    out.push_str("<h2>Values</h2>");
+    let success = non_fetch.iter().filter(|(_, v)| v.is_ok());
     out.push_str("<h3>Success</h3>");
-    out.push_str("<ul>");
-    for (k, _) in results.iter().filter(|(_, v)| v.is_ok()) {
-        out.push_str(&format!("<li>{k}</li>"));
+    if success.clone().count() != 0 {
+        out.push_str("<ul>");
+        for (k, _) in success {
+            out.push_str(&format!("<li>{k}</li>"));
+        }
+        out.push_str("</ul>");
+    } else {
+        out.push_str("None");
     }
-    out.push_str("</ul>");
 
-    out.push_str("<h3>Blocked</h3>");
-    out.push_str("<ul>");
-    for (k, _) in results.iter().filter(|(_, v)| {
+    let blocked = non_fetch.iter().filter(|(_, v)| {
         v.as_ref()
             .as_ref()
             .is_err_and(|e| *e == FetchError::NotAllowed)
-    }) {
-        out.push_str(&format!("<li>{k}</li>"));
+    });
+    out.push_str("<h3>Blocked</h3>");
+    if blocked.clone().count() != 0 {
+        out.push_str("<ul>");
+        for (k, _) in blocked {
+            out.push_str(&format!("<li>{k}</li>"));
+        }
+        out.push_str("</ul>");
+    } else {
+        out.push_str("None");
     }
-    out.push_str("</ul>");
 
     out.push_str("<h3>Error</h3>");
-    out.push_str("<table>");
-
-    out.push_str("<thead>");
-    out.push_str("<tr>");
-    out.push_str("<th>ID</th>");
-    out.push_str("<th>Error</th>");
-    out.push_str("</tr>");
-    out.push_str("</thead>");
-
-    out.push_str("<tbody>");
-    for (k, v) in results.iter().filter(|(_, v)| {
+    let error = non_fetch.iter().filter(|(_, v)| {
         v.as_ref()
             .as_ref()
             .is_err_and(|e| *e != FetchError::NotAllowed)
-    }) {
-        let Err(v) = v.as_ref() else { unreachable!() };
-        out.push_str("<tr>");
-        out.push_str(&format!("<td>{k}</td>"));
-        out.push_str(&format!("<td>{v:?}</td>"));
-        out.push_str("<td>Error</td>");
-        out.push_str("</tr>");
-    }
-    out.push_str("</tbody>");
+    });
+    if error.clone().count() != 0 {
+        out.push_str("<table>");
 
-    out.push_str("</table>");
+        out.push_str("<thead>");
+        out.push_str("<tr>");
+        out.push_str("<th>ID</th>");
+        out.push_str("<th>Error</th>");
+        out.push_str("</tr>");
+        out.push_str("</thead>");
+
+        out.push_str("<tbody>");
+        for (k, v) in error {
+            let Err(v) = v.as_ref() else { unreachable!() };
+            out.push_str("<tr>");
+            out.push_str(&format!("<td>{k}</td>"));
+            out.push_str(&format!("<td>{v:?}</td>"));
+            out.push_str("<td>Error</td>");
+            out.push_str("</tr>");
+        }
+        out.push_str("</tbody>");
+
+        out.push_str("</table>");
+    } else {
+        out.push_str("None");
+    }
 
     out.push_str("</div>");
 
