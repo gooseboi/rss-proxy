@@ -77,19 +77,32 @@ pub async fn deviantart_rss_handler(
 
                     match result {
                         Ok(_) | Err(FetchError::NotAllowed) => {
-                            state
-                                .deviantart_state
-                                .fetch_ids
-                                .write()
-                                .await
-                                .insert(id.clone().into());
+                            let id = id.clone();
+                            let coro_span = coro_span.clone();
+                            // This is spawned because if it weren't, there would be a deadlock if
+                            // trying to concurrently access the cache's value for this id and
+                            // locking fetch_ids
+                            tokio::spawn(
+                                async move {
+                                    if state
+                                        .deviantart_state
+                                        .fetch_ids
+                                        .write()
+                                        .await
+                                        .insert(id.clone().into())
+                                    {
+                                        tracing::info!("Added id to automatically fetched ids");
+                                    }
+                                }
+                                .instrument(coro_span),
+                            );
                         }
                         _ => {}
                     }
 
                     Arc::new(result.map(|s| utils::compress_zstd(&s.into_bytes())))
                 }
-                .instrument(coro_span),
+                .instrument(coro_span.clone()),
             )
             .await
     });
