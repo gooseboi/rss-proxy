@@ -62,6 +62,7 @@ async fn main() -> Result<()> {
     deviantart::spawn_refresh_tasks(&state.deviantart_state, &config);
 
     let app = Router::new()
+        .route("/version", get(handlers::version_handler))
         .route("/stats", get(handlers::stats_handler))
         .route("/deviantart", get(handlers::deviantart_rss_handler))
         .with_state(state);

@@ -12,6 +12,10 @@ use crate::{
 use std::sync::Arc;
 use tracing::Instrument as _;
 
+pub async fn version_handler() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 pub async fn stats_handler(
     State(state): State<AppState>,
 ) -> Result<Response<String>, (StatusCode, String)> {
