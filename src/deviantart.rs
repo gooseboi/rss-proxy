@@ -327,7 +327,7 @@ pub async fn get_stats(state: DeviantartState) -> String {
                     let remaining = state.cache_time - elapsed;
                     let mins = remaining.as_secs() / 60;
                     let secs = remaining.as_secs() % 60;
-                    out.push_str(&format!("<td>{mins}:{secs}</td>"));
+                    out.push_str(&format!("<td>{mins:02}:{secs:02}</td>"));
                     did_time_output = true;
                 }
                 Some(Some(CacheEntry {
