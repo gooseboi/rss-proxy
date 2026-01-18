@@ -6,19 +6,29 @@ use tracing::{Instrument as _, instrument};
 
 use crate::AppConfig;
 use crate::utils;
+use std::time::Instant;
+
+#[derive(Clone, Debug)]
+pub struct CacheEntry {
+    pub response: Result<Vec<u8>, FetchError>,
+    pub response_at: Instant,
+}
 
 #[derive(Clone, Debug)]
 pub struct DeviantartState {
-    pub cache: Cache<String, Arc<Result<Vec<u8>, FetchError>>>,
+    pub cache_time: Duration,
+    pub cache: Cache<String, Arc<CacheEntry>>,
     pub fetch_ids: Arc<RwLock<HashSet<Arc<str>>>>,
     pub global_lock: Arc<Mutex<()>>,
 }
 
 impl From<AppConfig> for DeviantartState {
     fn from(config: AppConfig) -> Self {
+        let cache_time = Duration::from_mins(config.deviantart_cache_ttl);
         DeviantartState {
+            cache_time,
             cache: CacheBuilder::new(config.deviantart_max_entries)
-                .time_to_live(Duration::from_mins(config.deviantart_cache_ttl))
+                .time_to_live(cache_time)
                 .build(),
             global_lock: Default::default(),
             fetch_ids: Default::default(),
@@ -178,7 +188,11 @@ fn spawn_refresh(state: &DeviantartState, config: &AppConfig) {
                                 Err(e) => tracing::error!(?e, "An error ocurred"),
                             };
 
-                            Arc::new(result.map(|s| utils::compress_zstd(&s.into_bytes())))
+                            let now = Instant::now();
+                            Arc::new(CacheEntry {
+                                response: result.map(|s| utils::compress_zstd(&s.into_bytes())),
+                                response_at: now,
+                            })
                         }
                         .instrument(id_span.clone()),
                     )
@@ -206,7 +220,12 @@ fn spawn_refresh_blocked(state: &DeviantartState, config: &AppConfig) {
             let mut did_fetch = false;
             for id in ids.iter() {
                 let id = id.as_ref();
-                let should_fetch = match state.cache.get(id).await.as_ref().map(|res| res.as_ref())
+                let should_fetch = match state
+                    .cache
+                    .get(id)
+                    .await
+                    .as_ref()
+                    .map(|res| &res.as_ref().response)
                 {
                     Some(Ok(_)) => false,
                     Some(Err(FetchError::NotAllowed)) => true,
@@ -247,7 +266,11 @@ fn spawn_refresh_blocked(state: &DeviantartState, config: &AppConfig) {
                             Err(e) => tracing::info!(?e, "An error ocurred"),
                         });
 
-                        Arc::new(result.map(|s| utils::compress_zstd(&s.into_bytes())))
+                        let now = Instant::now();
+                        Arc::new(CacheEntry {
+                            response: result.map(|s| utils::compress_zstd(&s.into_bytes())),
+                            response_at: now,
+                        })
                     })
                     .await;
             }
@@ -259,9 +282,9 @@ fn spawn_refresh_blocked(state: &DeviantartState, config: &AppConfig) {
 }
 
 async fn cache_value_with_timeout(
-    cache: Cache<String, Arc<Result<Vec<u8>, FetchError>>>,
+    cache: Cache<String, Arc<CacheEntry>>,
     id: &str,
-) -> Option<Option<Arc<Result<Vec<u8>, FetchError>>>> {
+) -> Option<Option<Arc<CacheEntry>>> {
     tokio::select! {
         val = cache.get(id) => {
             Some(val)
@@ -285,6 +308,7 @@ pub async fn get_stats(state: DeviantartState) -> String {
         out.push_str("<tr>");
         out.push_str("<th>ID</th>");
         out.push_str("<th>Status</th>");
+        out.push_str("<th>Remaining time</th>");
         out.push_str("</tr>");
         out.push_str("</thead>");
         out.push_str("<tbody>");
@@ -292,13 +316,33 @@ pub async fn get_stats(state: DeviantartState) -> String {
             out.push_str("<tr>");
             out.push_str(&format!("<td>{id}</td>"));
             let value = cache_value_with_timeout(state.cache.clone(), id).await;
+            let mut did_time_output = false;
             match value.as_ref().map(|v| v.as_ref().map(|res| res.as_ref())) {
-                Some(Some(Ok(_))) => out.push_str("<td>Ok</td>"),
-                Some(Some(Err(FetchError::NotAllowed))) => out.push_str("<td>Blocked</td>"),
-                Some(Some(Err(e))) => out.push_str(&format!("<td>{e:?}</td>")),
+                Some(Some(CacheEntry {
+                    response: Ok(_),
+                    response_at,
+                })) => {
+                    out.push_str("<td>Ok</td>");
+                    let elapsed = response_at.elapsed();
+                    let remaining = state.cache_time - elapsed;
+                    let mins = remaining.as_secs() / 60;
+                    let secs = remaining.as_secs() % 60;
+                    out.push_str(&format!("<td>{mins}:{secs}</td>"));
+                    did_time_output = true;
+                }
+                Some(Some(CacheEntry {
+                    response: Err(FetchError::NotAllowed),
+                    ..
+                })) => out.push_str("<td>Blocked</td>"),
+                Some(Some(CacheEntry {
+                    response: Err(e), ..
+                })) => out.push_str(&format!("<td>{e:?}</td>")),
 
                 Some(None) => out.push_str("<td>Empty</td>"),
                 None => out.push_str("<td>Stats timed out</td>"),
+            }
+            if !did_time_output {
+                out.push_str("<td>N/A</td>");
             }
             out.push_str("</tr>");
         }
@@ -317,7 +361,7 @@ pub async fn get_stats(state: DeviantartState) -> String {
 
     out.push_str("<h2>Not automatically fetched</h2>");
 
-    let success = non_fetch.iter().filter(|(_, v)| v.is_ok());
+    let success = non_fetch.iter().filter(|(_, v)| v.response.is_ok());
     out.push_str("<h3>Success</h3>");
     if success.clone().count() != 0 {
         out.push_str("<ul>");
@@ -331,6 +375,7 @@ pub async fn get_stats(state: DeviantartState) -> String {
 
     let blocked = non_fetch.iter().filter(|(_, v)| {
         v.as_ref()
+            .response
             .as_ref()
             .is_err_and(|e| *e == FetchError::NotAllowed)
     });
@@ -348,6 +393,7 @@ pub async fn get_stats(state: DeviantartState) -> String {
     out.push_str("<h3>Error</h3>");
     let error = non_fetch.iter().filter(|(_, v)| {
         v.as_ref()
+            .response
             .as_ref()
             .is_err_and(|e| *e != FetchError::NotAllowed)
     });
@@ -363,7 +409,9 @@ pub async fn get_stats(state: DeviantartState) -> String {
 
         out.push_str("<tbody>");
         for (k, v) in error {
-            let Err(v) = v.as_ref() else { unreachable!() };
+            let Err(v) = v.response.as_ref() else {
+                unreachable!()
+            };
             out.push_str("<tr>");
             out.push_str(&format!("<td>{k}</td>"));
             out.push_str(&format!("<td>{v:?}</td>"));

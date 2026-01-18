@@ -9,7 +9,7 @@ use crate::{
     deviantart::{self, FetchError, fetch_deviantart_rss_with_timeout},
     utils,
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 use tracing::Instrument as _;
 
 pub async fn version_handler() -> &'static str {
@@ -104,7 +104,11 @@ pub async fn deviantart_rss_handler(
                         _ => {}
                     }
 
-                    Arc::new(result.map(|s| utils::compress_zstd(&s.into_bytes())))
+                    let now = Instant::now();
+                    Arc::new(deviantart::CacheEntry {
+                        response: result.map(|s| utils::compress_zstd(&s.into_bytes())),
+                        response_at: now,
+                    })
                 }
                 .instrument(coro_span.clone()),
             )
@@ -114,7 +118,7 @@ pub async fn deviantart_rss_handler(
     let cached = handle.await.expect("can join thread");
     tracing::debug!(id = query.id, "Got result from cache for rss");
 
-    match *cached {
+    match cached.as_ref().response {
         Ok(ref cached) => {
             let bytes = utils::decompress_zstd(cached);
             let s = String::from_utf8(bytes).expect("we checked it was UTF-8 before putting it in");
