@@ -258,6 +258,20 @@ fn spawn_refresh_blocked(state: &DeviantartState, config: &AppConfig) {
     });
 }
 
+async fn cache_value_with_timeout(
+    cache: Cache<String, Arc<Result<Vec<u8>, FetchError>>>,
+    id: &str,
+) -> Option<Option<Arc<Result<Vec<u8>, FetchError>>>> {
+    tokio::select! {
+        val = cache.get(id) => {
+            Some(val)
+        }
+        _ = tokio::time::sleep(Duration::from_millis(50)) => {
+            None
+        }
+    }
+}
+
 pub async fn get_stats(state: DeviantartState) -> String {
     let mut out = String::new();
     out.push_str("<div>");
@@ -277,13 +291,14 @@ pub async fn get_stats(state: DeviantartState) -> String {
         for id in lock.iter() {
             out.push_str("<tr>");
             out.push_str(&format!("<td>{id}</td>"));
-            let value = state.cache.get(id.as_ref()).await;
-            match value.as_ref().map(|res| res.as_ref()) {
-                Some(Ok(_)) => out.push_str("<td>Ok</td>"),
-                Some(Err(FetchError::NotAllowed)) => out.push_str("<td>Blocked</td>"),
-                Some(Err(e)) => out.push_str(&format!("<td>{e:?}</td>")),
+            let value = cache_value_with_timeout(state.cache.clone(), id).await;
+            match value.as_ref().map(|v| v.as_ref().map(|res| res.as_ref())) {
+                Some(Some(Ok(_))) => out.push_str("<td>Ok</td>"),
+                Some(Some(Err(FetchError::NotAllowed))) => out.push_str("<td>Blocked</td>"),
+                Some(Some(Err(e))) => out.push_str(&format!("<td>{e:?}</td>")),
 
-                None => out.push_str("<td>Empty</td>"),
+                Some(None) => out.push_str("<td>Empty</td>"),
+                None => out.push_str("<td>Stats timed out</td>"),
             }
             out.push_str("</tr>");
         }
