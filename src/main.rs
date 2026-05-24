@@ -1,10 +1,10 @@
 use axum::{Router, routing::get};
+use clap::Parser as _;
 use color_eyre::Result;
 use std::{net::IpAddr, sync::Arc};
-
-use crate::deviantart::DeviantartState;
-use clap::Parser as _;
 use tracing::level_filters::LevelFilter;
+
+use crate::deviantart::{DeviantartState, DeviantartConfig};
 
 mod deviantart;
 mod handlers;
@@ -20,24 +20,16 @@ struct AppState {
 #[command(author, version, about)]
 pub struct AppConfig {
     /// Address to bind
-    #[arg(env = "RSS_PROXY_ADDR")]
+    #[arg(long, value_name = "RSS_PROXY_ADDR", env = "RSS_PROXY_ADDR")]
     bind_address: IpAddr,
 
     /// Port to bind
-    #[arg(env = "RSS_PROXY_PORT")]
+    #[arg(long, value_name = "RSS_PROXY_PORT", env = "RSS_PROXY_PORT")]
     bind_port: u16,
 
-    /// DeviantArt: Time to wait between two requests (in seconds)
-    #[arg(env = "RSS_PROXY_DEVIANTART_WAITING_TIME", default_value = "10")]
-    deviantart_waiting_time: u64,
-
-    /// DeviantArt: Time for a single (succesful) request to live in the cache (in minutes)
-    #[arg(env = "RSS_PROXY_DEVIANTART_CACHE_TTL", default_value = "30")]
-    deviantart_cache_ttl: u64,
-
-    /// DeviantArt: Maximum amount of entries to keep at one time
-    #[arg(env = "RSS_PROXY_DEVIANTART_MAX_ENTRIES", default_value = "300")]
-    deviantart_max_entries: u64,
+    /// Deviantart configuration
+    #[command(flatten)]
+    deviantart_config: DeviantartConfig,
 }
 
 #[tokio::main]

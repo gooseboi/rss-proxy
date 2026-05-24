@@ -68,7 +68,7 @@ pub async fn deviantart_rss_handler(
                     let result = fetch_deviantart_rss_with_timeout(
                         &id,
                         global_lock,
-                        state.config.deviantart_waiting_time,
+                        state.config.deviantart_config.deviantart_waiting_time,
                     )
                     .await;
                     tracing::info!("Finished fetching from network");

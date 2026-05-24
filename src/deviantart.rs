@@ -8,6 +8,21 @@ use crate::AppConfig;
 use crate::utils;
 use std::time::Instant;
 
+#[derive(clap::Parser, Debug, Clone)]
+pub struct DeviantartConfig {
+    /// DeviantArt: Time to wait between two requests (in seconds)
+    #[arg(long, env = "RSS_PROXY_DEVIANTART_WAITING_TIME", default_value = "10")]
+    pub deviantart_waiting_time: u64,
+
+    /// DeviantArt: Time for a single (succesful) request to live in the cache (in minutes)
+    #[arg(long, env = "RSS_PROXY_DEVIANTART_CACHE_TTL", default_value = "30")]
+    pub deviantart_cache_ttl: u64,
+
+    /// DeviantArt: Maximum amount of entries to keep at one time
+    #[arg(long, env = "RSS_PROXY_DEVIANTART_MAX_ENTRIES", default_value = "300")]
+    pub deviantart_max_entries: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct CacheEntry {
     pub response: Result<Vec<u8>, FetchError>,
@@ -24,10 +39,10 @@ pub struct DeviantartState {
 
 impl From<AppConfig> for DeviantartState {
     fn from(config: AppConfig) -> Self {
-        let cache_time = Duration::from_mins(config.deviantart_cache_ttl);
+        let cache_time = Duration::from_mins(config.deviantart_config.deviantart_cache_ttl);
         DeviantartState {
             cache_time,
-            cache: CacheBuilder::new(config.deviantart_max_entries).build(),
+            cache: CacheBuilder::new(config.deviantart_config.deviantart_max_entries).build(),
             global_lock: Default::default(),
             fetch_ids: Default::default(),
         }
@@ -184,7 +199,7 @@ fn spawn_refresh(state: &DeviantartState, config: &AppConfig) {
                             let result = fetch_deviantart_rss_with_timeout(
                                 id.as_ref(),
                                 state.global_lock.clone(),
-                                config.deviantart_waiting_time,
+                                config.deviantart_config.deviantart_waiting_time,
                             )
                             .instrument(id_span.clone())
                             .await;
@@ -262,7 +277,7 @@ fn spawn_refresh_blocked(state: &DeviantartState, config: &AppConfig) {
                         let result = fetch_deviantart_rss_with_timeout(
                             id,
                             state.global_lock.clone(),
-                            config.deviantart_waiting_time,
+                            config.deviantart_config.deviantart_waiting_time,
                         )
                         .instrument(span.clone())
                         .await;
