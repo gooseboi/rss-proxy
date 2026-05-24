@@ -27,9 +27,7 @@ impl From<AppConfig> for DeviantartState {
         let cache_time = Duration::from_mins(config.deviantart_cache_ttl);
         DeviantartState {
             cache_time,
-            cache: CacheBuilder::new(config.deviantart_max_entries)
-                .time_to_live(cache_time)
-                .build(),
+            cache: CacheBuilder::new(config.deviantart_max_entries).build(),
             global_lock: Default::default(),
             fetch_ids: Default::default(),
         }
@@ -165,6 +163,17 @@ fn spawn_refresh(state: &DeviantartState, config: &AppConfig) {
             span.in_scope(|| tracing::info!("Starting automatic refresh of {} ids", ids.len()));
             for id in ids.iter() {
                 let id_span = tracing::span!(parent: &span, tracing::Level::INFO, "automatic-refresh-for-id", id = id.as_ref());
+                let val = state.cache.get(id.as_ref()).await;
+
+                if let Some(val) = val
+                    && val.response_at.elapsed() <= state.cache_time
+                {
+                    continue;
+                }
+
+                // Remove and then run get_with_by_ref to coalesce with
+                // a possible fetch at the same time
+                state.cache.remove(id.as_ref()).await;
                 state
                     .cache
                     .get_with_by_ref(
@@ -324,10 +333,14 @@ pub async fn get_stats(state: DeviantartState) -> String {
                 })) => {
                     out.push_str("<td>Ok</td>");
                     let elapsed = response_at.elapsed();
-                    let remaining = state.cache_time - elapsed;
+                    let remaining = state.cache_time.abs_diff(elapsed);
                     let mins = remaining.as_secs() / 60;
                     let secs = remaining.as_secs() % 60;
-                    out.push_str(&format!("<td>{mins:02}:{secs:02}</td>"));
+                    if state.cache_time > elapsed {
+                        out.push_str(&format!("<td>{mins:02}:{secs:02}</td>"));
+                    } else {
+                        out.push_str(&format!("<td>Expired {mins:02}:{secs:02} ago</td>"));
+                    }
                     did_time_output = true;
                 }
                 Some(Some(CacheEntry {
